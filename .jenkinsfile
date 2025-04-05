@@ -1,0 +1,99 @@
+pipeline {
+    agent any
+    tools {
+        jdk 'JDK'
+        nodejs 'NodeJS'
+    }
+    environment {
+        SCANNER_HOME = tool 'SonarQube Scanner'
+    }
+    stages {
+        stage('clean workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+        stage('Checkout from Git') {
+            steps {
+                git branch: 'main', url: 'https://github.com/Balamuruganjeevi/nextflix-bala-new.git'
+            }
+        }
+        stage("Sonarqube Analysis") {
+            steps {
+                withSonarQubeEnv('sonar-server') {
+                    sh '''$SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=Netflix \
+                    -Dsonar.projectKey=Netflix'''
+                }
+            }
+        }
+        stage("Code Quality Gate"){
+           steps {
+                script {
+                    waitForQualityGate abortPipeline: false, credentialsId: 'Sonar-token' 
+                }
+            } 
+        }
+        stage('TRIVY FS SCAN') {
+            steps {
+                script {
+                    try {
+                        sh "trivy fs . > trivyfs.txt" 
+                    }catch(Exception e){
+                        input(message: "Are you sure to proceed?", ok: "Proceed")
+                    }
+                }
+            }
+        }
+        stage("Docker Build Image"){
+            steps{
+                   
+                sh "docker build --build-arg API_KEY=2af0904de8242d48e8527eeedc3e19d9 -t balajeevidesh4010/netflix:${BUILD_NUMBER} ."
+            }
+        }
+        stage("TRIVY"){
+            steps{
+                sh "trivy image netflix > trivyimage.txt"
+                script{
+                    input(message: "Are you sure to proceed?", ok: "Proceed")
+                }
+            }
+        }
+        stage("Tag & Push to DockerHub") {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker-login') {
+                        sh """
+                        docker tag balajeevidesh4010/netflix:${BUILD_NUMBER} balajeevidesh4010/netflix:latest
+                        docker push balajeevidesh4010/netflix:${BUILD_NUMBER}
+                        docker push balajeevidesh4010/netflix:latest
+                        """
+                    }
+                }
+            }
+        }
+        stage("Cleanup Images") {
+            steps {
+                script {
+                    sh '''
+                    docker rmi balajeevidesh4010/netflix:${BUILD_NUMBER}
+                    docker rmi balajeevidesh4010/netflix:latest
+                    '''
+                }
+            }
+        }
+        stage("Update Kubernetes Manifests") {
+            steps {
+                sh """
+                git clone https://github.com/Balamuruganjeevi/netflix-devsecops-deployment.git
+                cd netflix-devsecops-deployment
+                sed -i 's|image: balajeevidesh4010/netflix:.*|image: balajeevidesh4010/netflix:${BUILD_NUMBER} |' ConfigurationFiles/deployment.yaml
+                git config user.name "Jenkins"
+                git config user.email "jenkins@example.com"
+                git add ConfigurationFiles/deployment.yaml
+                git commit -m "Updated deployment image to ${BUILD_NUMBER}"
+                git push https://Balamuruganjeevi:$GITHUB_TOKEN@github.com/Balamuruganjeevi/netflix-devsecops-deployment.git main
+                """
+            }
+        }
+    }
+}
